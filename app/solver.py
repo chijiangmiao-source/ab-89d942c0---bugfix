@@ -393,6 +393,15 @@ def euler_circuit(
     start: str,
     multiplicity: Sequence[int],
 ) -> List[RouteStep]:
+    """Hierholzer's algorithm on the expanded multigraph.
+
+    A plain greedy walk can close at the start while unused copies remain
+    on a side branch (e.g. K5 returns to A after 7 steps, leaving the C-D-E
+    triangle behind).  Hierholzer instead backtracks along the tour built so
+    far until a vertex with unused copies is found and splices a fresh
+    sub-tour in there, so every copy is used exactly once.  Steps are
+    emitted while backtracking, i.e. in reverse tour order.
+    """
     copies: List[Tuple[int, str, str, int]] = []
     for e in edges:
         for _ in range(multiplicity[e.index]):
@@ -403,28 +412,35 @@ def euler_circuit(
         adj[u].append(ci)
         adj[v].append(ci)
 
-    steps: List[RouteStep] = []
-    dup_counter: Dict[int, int] = {}
-    cur = start
     used = [False] * len(copies)
     cursor = {node: 0 for node in nodes}
-    remaining = len(copies)
-    while remaining:
+    vstack = [start]
+    estack: List[int] = []  # estack[i] is the copy used to reach vstack[i + 1]
+    emitted: List[Tuple[int, str, str]] = []  # (copy index, frm, to), reversed
+    while vstack:
+        cur = vstack[-1]
         incident = adj[cur]
         pos = cursor[cur]
         while pos < len(incident) and used[incident[pos]]:
             pos += 1
         cursor[cur] = pos
-        if pos == len(incident):
-            break
+        if pos < len(incident):
+            ci = incident[pos]
+            used[ci] = True
+            _, u, v, _ = copies[ci]
+            vstack.append(v if cur == u else u)
+            estack.append(ci)
+        else:
+            vstack.pop()
+            if estack:
+                ci = estack.pop()
+                # in the final tour this copy is traversed into cur
+                emitted.append((ci, vstack[-1], cur))
 
-        chosen = incident[pos]
-        cursor[cur] = pos + 1
-        used[chosen] = True
-        remaining -= 1
-        ci = chosen
-        ei, u, v, length = copies[ci]
-        frm, to = (u, v) if cur == u else (v, u)
+    steps: List[RouteStep] = []
+    dup_counter: Dict[int, int] = {}
+    for ci, frm, to in reversed(emitted):
+        ei, _, _, length = copies[ci]
         dup_counter[ei] = dup_counter.get(ei, 0) + 1
         steps.append(
             RouteStep(
@@ -436,7 +452,6 @@ def euler_circuit(
                 duplicate_no=dup_counter[ei],
             )
         )
-        cur = to
     return steps
 
 

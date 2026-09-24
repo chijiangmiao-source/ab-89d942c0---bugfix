@@ -1,5 +1,7 @@
 """Tests for the HTTP-facing serialization layer (pure, no server needed)."""
 
+import itertools
+
 from app.server import run_audit
 
 
@@ -54,6 +56,84 @@ def test_eulerian_payload():
     assert r["canonicalVector"] == "000"
     assert r["canonicalEdges"] == []
     assert all(e["classification"] == "never" for e in r["edges"])
+
+
+def _check_route_payload(r, start):
+    """Step-by-step route reconciliation against the summary fields."""
+    route = r["route"]
+    # continuity and closure at the inspection port
+    assert route[0]["from"] == start
+    for prev, nxt in zip(route, route[1:]):
+        assert prev["to"] == nxt["from"]
+    assert route[-1]["to"] == start
+    # sequence numbers are 1..N and lengths reconcile with the summary
+    assert [s["seq"] for s in route] == list(range(1, len(route) + 1))
+    assert sum(s["length"] for s in route) == (
+        r["totalLength"] + r["addedLength"]
+    )
+    # positions: every copy of every edge appears at exactly the steps listed
+    flat = []
+    for e in r["edges"]:
+        ps = r["positions"][str(e["index"])]
+        assert len(ps) == e["copies"]
+        for p in ps:
+            st = route[p - 1]
+            assert st["edgeId"] == e["id"] and st["edgeIndex"] == e["index"]
+        flat.extend(ps)
+    assert sorted(flat) == list(range(1, len(route) + 1))
+
+
+def test_k5_complete_network_payload():
+    payload = {
+        "nodes": list("ABCDE"),
+        "edges": [
+            {"id": f"q{i:02d}", "u": a, "v": b, "length": 1}
+            for i, (a, b) in enumerate(itertools.combinations("ABCDE", 2))
+        ],
+        "start": "A",
+    }
+    r = run_audit(payload)
+    assert r["ok"] is True
+    assert r["eulerian"] is True
+    assert r["totalLength"] == 10
+    assert r["addedLength"] == 0
+    assert r["optimalCount"] == 1
+    assert r["canonicalVector"] == "0000000000"
+    assert r["canonicalEdges"] == []
+    assert len(r["route"]) == 10
+    # each of the ten pipes is walked exactly once
+    assert sorted(s["edgeId"] for s in r["route"]) == [
+        e["id"] for e in payload["edges"]
+    ]
+    assert all(e["copies"] == 1 for e in r["edges"])
+    _check_route_payload(r, "A")
+
+
+def test_duplicate_copies_payload():
+    # non-Eulerian: canonical set duplicates q6, so the route has 8 steps
+    # and q6 must show up twice with copy numbers 1 and 2
+    payload = {
+        "nodes": list("ABCDE"),
+        "edges": [
+            {"id": "q0", "u": "A", "v": "B", "length": 1},
+            {"id": "q1", "u": "B", "v": "C", "length": 1},
+            {"id": "q2", "u": "C", "v": "A", "length": 1},
+            {"id": "q3", "u": "B", "v": "D", "length": 1},
+            {"id": "q4", "u": "D", "v": "E", "length": 1},
+            {"id": "q5", "u": "E", "v": "B", "length": 1},
+            {"id": "q6", "u": "D", "v": "E", "length": 1},
+        ],
+        "start": "A",
+    }
+    r = run_audit(payload)
+    assert r["ok"] is True
+    assert r["eulerian"] is False
+    assert r["addedLength"] == 1
+    assert r["canonicalEdges"] == ["q6"]
+    assert len(r["route"]) == 8
+    q6_steps = [s for s in r["route"] if s["edgeId"] == "q6"]
+    assert sorted(s["copy"] for s in q6_steps) == [1, 2]
+    _check_route_payload(r, "A")
 
 
 def test_failure_payload_locations():

@@ -4,7 +4,8 @@ Runs, in order:
   1. the code test suite (pytest);
   2. domain boundary checks against the solver directly
        - odd-degree network: exact co-optimal count / classification,
-       - Eulerian network: zero augmentation boundary;
+       - Eulerian network: zero augmentation boundary,
+       - K5 complete network: closed 10-step tour covering every pipe;
   3. an HTTP smoke test against the running web service
        - GET /health,
        - POST /api/audit success case,
@@ -19,6 +20,7 @@ Exits 0 only when every stage passes; the failed stage is reported.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import socket
@@ -38,6 +40,16 @@ K4 = {
         {"id": "e4", "u": "B", "v": "C", "length": 1},
         {"id": "e5", "u": "B", "v": "D", "length": 1},
         {"id": "e6", "u": "C", "v": "D", "length": 1},
+    ],
+    "start": "A",
+}
+
+# 5-node complete network: Eulerian as-is; the tour must list all 10 pipes.
+K5 = {
+    "nodes": list("ABCDE"),
+    "edges": [
+        {"id": f"q{i:02d}", "u": a, "v": b, "length": 1}
+        for i, (a, b) in enumerate(itertools.combinations("ABCDE", 2))
     ],
     "start": "A",
 }
@@ -140,6 +152,28 @@ def run_domain_checks() -> bool:
     )
     check(len(r3.route) == 3 and r3.route[-1].to == "B",
           "欧拉回路从检修口出发并返回")
+
+    # Eulerian complete network K5: the tour must splice in every branch
+    # (a naive walk closes at A after 7 steps and drops the C-D-E triangle)
+    r4 = audit(K5["nodes"], K5["edges"], K5["start"])
+    check(r4.is_eulerian and r4.added_length == 0, "K5 完整管网零增程")
+    check(r4.optimal_count == 1 and r4.bit_vector == "0" * 10,
+          "K5 同优集合唯一且位向量全 0")
+    check(len(r4.route) == 10, "K5 路线恰好 10 步")
+    check(
+        sorted(s.edge_id for s in r4.route) == [e["id"] for e in K5["edges"]],
+        "K5 每条管段恰好经过一次",
+    )
+    check(
+        r4.route[0].frm == "A"
+        and r4.route[-1].to == "A"
+        and all(a.to == b.frm for a, b in zip(r4.route, r4.route[1:])),
+        "K5 路线连续且闭合于检修口 A",
+    )
+    check(
+        sum(s.length for s in r4.route) == r4.total_length + r4.added_length,
+        "K5 路线长度与汇总总长度一致",
+    )
     return True
 
 
@@ -219,6 +253,32 @@ def run_http_smoke() -> bool:
         check(body.get("ok") and body.get("addedLength") == 0,
               "HTTP 欧拉管网零增程")
 
+        status, body = _post(base, "/api/audit", K5)
+        check(status == 200 and body.get("ok") is True,
+              "POST /api/audit 五节点完整管网审计成功")
+        check(len(body.get("route", [])) == 10,
+              "HTTP K5 路线恰好 10 步（每条管段一次）")
+        route = body["route"]
+        check(
+            route[0]["from"] == "A"
+            and route[-1]["to"] == "A"
+            and all(a["to"] == b["from"] for a, b in zip(route, route[1:])),
+            "HTTP K5 路线连续且闭合",
+        )
+        check(
+            sum(s["length"] for s in route)
+            == body["totalLength"] + body["addedLength"],
+            "HTTP K5 路线长度与汇总一致",
+        )
+        positions = body.get("positions", {})
+        flat = [
+            p
+            for e in body["edges"]
+            for p in positions.get(str(e["index"]), [])
+        ]
+        check(sorted(flat) == list(range(1, 11)),
+              "HTTP K5 positions 覆盖全部 10 步")
+
         status, body = _post(base, "/api/audit", BAD)
         check(status == 200 and body.get("ok") is False,
               "非法输入返回 ok=false（HTTP 层仍为 200）")
@@ -254,7 +314,7 @@ def main() -> int:
     if failures:
         print("VERIFY 失败：" + "、".join(failures))
         return 1
-    print("VERIFY 全部通过：测试 / 奇度同优分类 / 欧拉零增程 / HTTP 冒烟")
+    print("VERIFY 全部通过：测试 / 奇度同优分类 / 欧拉零增程与路线核对 / HTTP 冒烟")
     return 0
 
 

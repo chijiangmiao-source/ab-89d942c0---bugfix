@@ -161,6 +161,62 @@ def test_eulerian_triangle_zero_augmentation():
     check_route(r, "B")
 
 
+def test_k5_complete_network_full_tour():
+    # 5-node complete network: 10 unit edges q00..q09, every vertex degree 4
+    # -> already Eulerian.  A naive walk closes at A after 7 steps and drops
+    # the C-D-E triangle; the tour must splice in every branch instead.
+    nodes = list("ABCDE")
+    raw = [
+        edge(f"q{i:02d}", a, b, 1)
+        for i, (a, b) in enumerate(itertools.combinations(nodes, 2))
+    ]
+    r = audit(nodes, raw, "A")
+    assert r.is_eulerian
+    assert r.total_length == 10
+    assert r.added_length == 0
+    assert r.optimal_count == 1
+    assert r.bit_vector == "0" * 10
+    assert all(v == "never" for v in r.classification.values())
+    assert r.multiplicity == (1,) * 10
+    assert len(r.route) == 10
+    # every pipe exactly once
+    assert sorted(st.edge_id for st in r.route) == [e["id"] for e in raw]
+    # step-by-step continuity, closure, copy coverage and length
+    check_route(r, "A")
+
+
+def test_duplicate_copies_not_dropped():
+    # Two triangles sharing B plus a parallel D-E edge: odd vertices D, E;
+    # the canonical set duplicates q6, and the expanded multigraph has a
+    # local circuit at the start (A-B-C-A).  The route must still consume
+    # every original and duplicated copy exactly once.
+    nodes = list("ABCDE")
+    raw = [
+        edge("q0", "A", "B", 1),
+        edge("q1", "B", "C", 1),
+        edge("q2", "C", "A", 1),
+        edge("q3", "B", "D", 1),
+        edge("q4", "D", "E", 1),
+        edge("q5", "E", "B", 1),
+        edge("q6", "D", "E", 1),
+    ]
+    r = audit(nodes, raw, "A")
+    assert not r.is_eulerian
+    assert r.odd_vertices == ("D", "E")
+    assert r.added_length == 1
+    assert r.optimal_count == 2  # duplicate q4 or q6
+    assert r.bit_vector == "0000001"
+    assert r.canonical_set == frozenset({6})
+    assert r.classification[4] == r.classification[6] == "optional"
+    assert all(r.classification[i] == "never" for i in (0, 1, 2, 3, 5))
+    assert r.multiplicity == (1, 1, 1, 1, 1, 1, 2)
+    assert len(r.route) == 8  # 7 originals + 1 duplicate copy
+    # the duplicated edge is walked twice, copies numbered in order
+    q6 = [st.duplicate_no for st in r.route if st.edge_id == "q6"]
+    assert q6 == [1, 2]
+    check_route(r, "A")
+
+
 def test_two_equal_shortest_paths():
     # odd A,B; shortest A-B has two equal length-2 routes; a long direct
     # edge is never part of an optimum
