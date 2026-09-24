@@ -78,13 +78,24 @@ def random_graph(rng, nnodes, nedges):
     return nodes, raw
 
 
+def complete_kn(n):
+    """K_n with unit edges named q00.., identifier order matching pair order."""
+    nodes = [chr(ord("A") + i) for i in range(n)]
+    raw = [
+        edge(f"q{k:02d}", a, b, 1)
+        for k, (a, b) in enumerate(itertools.combinations(nodes, 2))
+    ]
+    return nodes, raw
+
+
 def check_route(r, start):
     # every copy used exactly the right number of times, contiguous & closed
     seen = [0] * len(r.edges)
     assert r.route[0].frm == start
     cur = start
     total = 0
-    for st in r.route:
+    positions = {}
+    for seq, st in enumerate(r.route, start=1):
         assert st.frm == cur
         assert (st.frm, st.to) in {
             (r.edges[st.edge_index].u, r.edges[st.edge_index].v),
@@ -92,16 +103,20 @@ def check_route(r, start):
         }
         seen[st.edge_index] += 1
         total += st.length
+        positions.setdefault(st.edge_index, []).append(seq)
         cur = st.to
     assert cur == start
     assert tuple(seen) == r.multiplicity
     assert total == r.total_length + r.added_length
+    # one step per declared copy: no edge copy dropped and none invented
+    assert len(r.route) == sum(r.multiplicity)
     # duplicate numbers per edge are 1..mult
     per = {}
     for st in r.route:
         per.setdefault(st.edge_index, []).append(st.duplicate_no)
     for ei, nos in per.items():
         assert sorted(nos) == list(range(1, r.multiplicity[ei] + 1))
+    return positions
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +161,105 @@ def test_k4_three_distinct_optimal_sets():
     assert r.canonical_set == frozenset({2, 3})
     assert all(v == "optional" for v in r.classification.values())
     check_route(r, "A")
+
+
+def test_k5_complete_eulerian_network_full_route():
+    # Five nodes, every pair joined by one unit edge: q00..q09.  Every degree
+    # is 4, so the graph is already Eulerian and the tour must use all ten
+    # edges exactly once.  A greedy walk closes a 7-step loop at A early and
+    # strands the C-D-E triangle (q07,q08,q09); Hierholzer must splice it in.
+    nodes, raw = complete_kn(5)
+    assert len(raw) == 10
+    r = audit(nodes, raw, "A")
+
+    # summary boundary
+    assert r.is_eulerian
+    assert r.odd_vertices == ()
+    assert r.total_length == 10
+    assert r.added_length == 0
+    assert r.optimal_count == 1
+    assert r.bit_vector == "0" * 10
+    assert r.canonical_set == frozenset()
+    assert all(v == "never" for v in r.classification.values())
+    assert r.multiplicity == (1,) * 10
+
+    # step-by-step: 10 steps, continuous, closed at A, every edge once
+    assert len(r.route) == 10
+    positions = check_route(r, "A")
+    assert r.route[0].frm == "A"
+    assert r.route[-1].to == "A"
+    assert sorted(positions) == list(range(10))
+    assert {r.route[p[0] - 1].edge_id for p in positions.values()} == {
+        e.eid for e in r.edges
+    }
+    for e in r.edges:
+        assert positions[e.index] == [
+            i + 1 for i, st in enumerate(r.route) if st.edge_index == e.index
+        ]
+        assert all(st.duplicate_no == 1 for st in r.route
+                   if st.edge_index == e.index)
+    assert sum(st.length for st in r.route) == r.total_length
+
+
+@pytest.mark.parametrize("start", ["A", "B", "C", "D", "E"])
+def test_k5_route_from_every_inspection_node(start):
+    nodes, raw = complete_kn(5)
+    r = audit(nodes, raw, start)
+    assert len(r.route) == 10
+    check_route(r, start)
+
+
+def test_augmented_network_duplicate_copies_not_lost():
+    # K4 unit edges: all four vertices odd; canonical set is {e3,e4}
+    # (vector 001100), so the expanded multigraph has 8 copies.  The tour
+    # must traverse both copies of each duplicated edge (numbered 1 and 2)
+    # and never strand a branch inside a sub-circuit.
+    nodes = list("ABCD")
+    raw = [
+        edge("e1", "A", "B", 1),
+        edge("e2", "A", "C", 1),
+        edge("e3", "A", "D", 1),
+        edge("e4", "B", "C", 1),
+        edge("e5", "B", "D", 1),
+        edge("e6", "C", "D", 1),
+    ]
+    r = audit(nodes, raw, "A")
+    assert not r.is_eulerian
+    assert r.added_length == 2
+    assert r.canonical_set == frozenset({2, 3})
+    assert r.multiplicity == (1, 1, 2, 2, 1, 1)
+
+    assert len(r.route) == 8
+    positions = check_route(r, "A")
+    # duplicated edges appear at two positions each with copies 1 then 2;
+    # each position reconstructs from the route itself
+    for ei in (2, 3):
+        assert len(positions[ei]) == 2
+        steps = [r.route[p - 1] for p in positions[ei]]
+        assert [s.duplicate_no for s in steps] == [1, 2]
+    for ei in (0, 1, 4, 5):
+        assert positions[ei] and len(positions[ei]) == 1
+        assert r.route[positions[ei][0] - 1].duplicate_no == 1
+    # route step length total equals original + added length
+    assert sum(st.length for st in r.route) == 8
+    assert sum(st.length for st in r.route) == r.total_length + r.added_length
+
+
+def test_tree_branches_all_covered_after_augmentation():
+    # A tree's every edge is duplicated; without proper circuit splicing a
+    # walk can close a local loop and abandon other branches.
+    nodes = list("ABCDE")
+    raw = [
+        edge("t1", "A", "B", 1),
+        edge("t2", "B", "C", 2),
+        edge("t3", "B", "D", 3),
+        edge("t4", "D", "E", 4),
+    ]
+    r = audit(nodes, raw, "C")
+    assert r.added_length > 0
+    assert all(m == 2 for m in r.multiplicity)
+    assert len(r.route) == 8
+    check_route(r, "C")
 
 
 def test_eulerian_triangle_zero_augmentation():

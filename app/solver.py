@@ -393,6 +393,17 @@ def euler_circuit(
     start: str,
     multiplicity: Sequence[int],
 ) -> List[RouteStep]:
+    """Closed Euler tour of the expanded multigraph via Hierholzer's algorithm.
+
+    Each traversed copy appears exactly once.  A greedy walk that only follows
+    unused edges until it stalls is not enough: when it closes a sub-circuit
+    early, other branches with unused copies are stranded.  Hierholzer keeps
+    the vertex stack and, on stalling, backtracks; every detached sub-circuit
+    gets spliced into the tour, so no copy can be dropped.
+
+    ``duplicate_no`` numbers the copies of each edge 1..multiplicity in the
+    order in which the final tour traverses them.
+    """
     copies: List[Tuple[int, str, str, int]] = []
     for e in edges:
         for _ in range(multiplicity[e.index]):
@@ -403,26 +414,44 @@ def euler_circuit(
         adj[u].append(ci)
         adj[v].append(ci)
 
+    used = [False] * len(copies)
+    cursor = {node: 0 for node in nodes}
+
+    def next_copy(v: str) -> int:
+        incident = adj[v]
+        pos = cursor[v]
+        while pos < len(incident) and used[incident[pos]]:
+            pos += 1
+        cursor[v] = pos
+        if pos == len(incident):
+            return -1
+        cursor[v] = pos + 1
+        return incident[pos]
+
+    # Iterative Hierholzer: grow the trail from the stack top; when stuck,
+    # pop the vertex (and the edge that reached it) onto the circuit.
+    vstack: List[str] = [start]
+    estack: List[int] = []
+    reversed_tour: List[int] = []
+    while vstack:
+        ci = next_copy(vstack[-1])
+        if ci >= 0:
+            used[ci] = True
+            ei, u, v, _ = copies[ci]
+            nxt = v if vstack[-1] == u else u
+            vstack.append(nxt)
+            estack.append(ci)
+        else:
+            vstack.pop()
+            if estack:
+                reversed_tour.append(estack.pop())
+
+    tour = reversed_tour[::-1]
+
     steps: List[RouteStep] = []
     dup_counter: Dict[int, int] = {}
     cur = start
-    used = [False] * len(copies)
-    cursor = {node: 0 for node in nodes}
-    remaining = len(copies)
-    while remaining:
-        incident = adj[cur]
-        pos = cursor[cur]
-        while pos < len(incident) and used[incident[pos]]:
-            pos += 1
-        cursor[cur] = pos
-        if pos == len(incident):
-            break
-
-        chosen = incident[pos]
-        cursor[cur] = pos + 1
-        used[chosen] = True
-        remaining -= 1
-        ci = chosen
+    for ci in tour:
         ei, u, v, length = copies[ci]
         frm, to = (u, v) if cur == u else (v, u)
         dup_counter[ei] = dup_counter.get(ei, 0) + 1

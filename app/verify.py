@@ -19,12 +19,14 @@ Exits 0 only when every stage passes; the failed stage is reported.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 import urllib.request
 
@@ -38,6 +40,17 @@ K4 = {
         {"id": "e4", "u": "B", "v": "C", "length": 1},
         {"id": "e5", "u": "B", "v": "D", "length": 1},
         {"id": "e6", "u": "C", "v": "D", "length": 1},
+    ],
+    "start": "A",
+}
+
+# Five-node complete network: ten unit edges q00..q09, already Eulerian.
+K5_NODES = ["A", "B", "C", "D", "E"]
+K5 = {
+    "nodes": K5_NODES,
+    "edges": [
+        {"id": f"q{k:02d}", "u": a, "v": b, "length": 1}
+        for k, (a, b) in enumerate(itertools.combinations(K5_NODES, 2))
     ],
     "start": "A",
 }
@@ -67,6 +80,37 @@ def check(cond, msg):
     if not cond:
         raise AssertionError(msg)
     print(f"  PASS: {msg}")
+
+
+def check_route_steps(route, edges, start, copies_by_id, expected_total):
+    """Recompute continuity, closure, copy coverage and length from a route.
+
+    Works on both solver RouteStep objects and serialized JSON step dicts.
+    """
+    endpoint = {e.eid: (e.u, e.v) for e in edges}
+    seen: dict = {}
+    cur = start
+    total = 0
+    for st in route:
+        if hasattr(st, "edge_id"):
+            eid, frm, to, length, copy_no = (
+                st.edge_id, st.frm, st.to, st.length, st.duplicate_no)
+        else:
+            eid, frm, to, length, copy_no = (
+                st["edgeId"], st["from"], st["to"], st["length"], st["copy"])
+        check(frm == cur, f"路线在管段 {eid} 处连续")
+        check((frm, to) in {endpoint[eid], endpoint[eid][::-1]},
+              f"管段 {eid} 的经过位置与端点一致")
+        seen.setdefault(eid, []).append(copy_no)
+        total += length
+        cur = to
+    check(cur == start, "路线回到检修口")
+    check(len(route) == sum(copies_by_id.values()), "路线步数等于副本总数")
+    for eid, n in copies_by_id.items():
+        check(sorted(seen.get(eid, [])) == list(range(1, n + 1)),
+              f"管段 {eid} 的 {n} 个副本各经过一次且编号连续")
+    check(total == expected_total,
+          f"路线步骤长度之和 {total} 与汇总总长度 {expected_total} 一致")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +152,11 @@ def run_domain_checks() -> bool:
         and r.route[-1].to == "A",
         "K4 规范路线闭合且副本数吻合",
     )
+    check_route_steps(
+        r.route, r.edges, "A",
+        {"e1": 1, "e2": 1, "e3": 2, "e4": 2, "e5": 1, "e6": 1},
+        8,
+    )
 
     # optional-vs-required mix: two equal shortest routes + a long edge
     mix_nodes = ["A", "B", "X", "Y"]
@@ -140,6 +189,18 @@ def run_domain_checks() -> bool:
     )
     check(len(r3.route) == 3 and r3.route[-1].to == "B",
           "欧拉回路从检修口出发并返回")
+
+    # Eulerian K5: a greedy walk truncates the tour at 7 of 10 edges;
+    # Hierholzer must list all ten steps and close back at A.
+    r4 = audit(K5["nodes"], K5["edges"], K5["start"])
+    check(r4.is_eulerian and r4.added_length == 0, "K5 为零增程欧拉管网")
+    check(r4.total_length == 10 and r4.bit_vector == "0" * 10,
+          "K5 原长度 10、规范向量全 0")
+    check(len(r4.route) == 10, "K5 路线恰为 10 步（十条管段各一次）")
+    check_route_steps(
+        r4.route, r4.edges, "A",
+        {f"q{k:02d}": 1 for k in range(10)}, 10,
+    )
     return True
 
 
@@ -214,6 +275,49 @@ def run_http_smoke() -> bool:
               "HTTP 返回规范位向量 001100")
         check(len(body.get("route", [])) == 8,
               "HTTP 返回 8 步闭合路线（6 原边 + 2 重复副本）")
+        check_route_steps(
+            body["route"],
+            [types.SimpleNamespace(eid=e["id"], u=e["u"], v=e["v"])
+             for e in body["edges"]],
+            "A",
+            {"e1": 1, "e2": 1, "e3": 2, "e4": 2, "e5": 1, "e6": 1},
+            8,
+        )
+        # positions must reconstruct exactly from the route, duplicate copies
+        # included
+        for e in body["edges"]:
+            want = [st["seq"] for st in body["route"]
+                    if st["edgeId"] == e["id"]]
+            check(body["positions"][str(e["index"])] == want,
+                  f"管段 {e['id']} 的 positions 与路线逐步复算一致")
+
+        # Eulerian K5: summary is fine but the tour must list all 10 edges;
+        # the old greedy walk stopped after 7 steps and stranded q07..q09.
+        status, body = _post(base, "/api/audit", K5)
+        check(status == 200 and body.get("ok") is True,
+              "POST /api/audit K5 完整管网审计成功")
+        check(body.get("eulerian") is True
+              and body.get("addedLength") == 0
+              and body.get("totalLength") == 10,
+              "K5 汇总：欧拉管网、原长度 10、增加长度 0")
+        check(body.get("canonicalVector") == "0" * 10,
+              "K5 规范位向量全 0")
+        check(len(body.get("route", [])) == 10,
+              "K5 路线恰为 10 步（不是提前闭合的 7 步）")
+        check_route_steps(
+            body["route"],
+            [types.SimpleNamespace(eid=e["id"], u=e["u"], v=e["v"])
+             for e in body["edges"]],
+            "A",
+            {f"q{k:02d}": 1 for k in range(10)},
+            10,
+        )
+        for e in body["edges"]:
+            want = [st["seq"] for st in body["route"]
+                    if st["edgeId"] == e["id"]]
+            check(body["positions"][str(e["index"])] == want
+                  and len(want) == 1,
+                  f"K5 管段 {e['id']} 在 positions 中恰好出现一次")
 
         status, body = _post(base, "/api/audit", TRIANGLE)
         check(body.get("ok") and body.get("addedLength") == 0,

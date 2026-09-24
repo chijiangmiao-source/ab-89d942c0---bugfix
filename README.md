@@ -73,7 +73,7 @@ python -m app.verify
 pytest -q
 ```
 
-- `tests/test_solver.py`：确定性用例 + 60 组随机图对**逐子集暴力枚举 oracle** 的交叉验证（同优数量、分类、规范集、路线）；
+- `tests/test_solver.py`：确定性用例（含五节点完整管网 K5 的 10 步欧拉回路逐步核对、含规范重复边的非欧拉网络副本核对）+ 60 组随机图对**逐子集暴力枚举 oracle** 的交叉验证（同优数量、分类、规范集、路线）；
 - `tests/test_api.py`：HTTP 序列化、错误定位、畸形请求。
 
 ## 页面
